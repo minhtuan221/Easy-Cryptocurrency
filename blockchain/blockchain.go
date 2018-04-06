@@ -12,6 +12,7 @@ import (
 	"hash"
 	"io"
 	"log"
+	"math"
 	"math/big"
 	"os"
 	"sort"
@@ -40,6 +41,8 @@ func PrettyPrint(data interface{}) string {
 5. convert byte to big.int
 6. use big.int for signture
 */
+
+// Wallet for generate Private Key, Public Key
 type Wallet struct {
 	curve      elliptic.Curve
 	privatekey *ecdsa.PrivateKey
@@ -282,6 +285,8 @@ func (self *Trans) Hash() string {
 type Block struct {
 	Index        int
 	Previoushash string
+	Reward       float64
+	MinerBy      string
 	Transactions map[string]Trans
 	Proof        int64
 	Timestamp    string
@@ -334,15 +339,19 @@ func StrToTrans(beforeHash string) Trans {
 
 func (block *Block) Add(trans Trans) bool {
 
-	if block.CheckSignature(trans) == false {
-		fmt.Println("Add transaction failed signature")
-		PrettyPrint(block)
-		return false
-	}
-	if block.CheckInfo(trans) == false {
-		fmt.Println("Add transaction failed info, balance")
-		PrettyPrint(block)
-		return false
+	// check if the transaction is reward miner or not
+	if trans.Receiver != block.MinerBy {
+
+		if block.CheckSignature(trans) == false {
+			fmt.Println("Add transaction failed signature")
+			PrettyPrint(block)
+			return false
+		}
+		if block.CheckInfo(trans) == false {
+			fmt.Println("Add transaction failed info, balance")
+			PrettyPrint(block)
+			return false
+		}
 	}
 	block.Transactions[trans.Hash()] = trans
 	return true
@@ -366,6 +375,7 @@ func (block *Block) SortTransactions() {
 }
 func (block *Block) Ready() {
 	block.GetTime()
+	block.RewardMiner()
 	block.SortTransactions()
 	// return block.Timestamp
 }
@@ -373,6 +383,27 @@ func (block *Block) Ready() {
 func (block *Block) GetTime() {
 	block.Timestamp = string(time.Now().Format(time.RFC850))
 	// return block.Timestamp
+}
+
+func (block *Block) GetFee() float64 {
+	// Get block fee
+	var fee float64
+	fee = 0.0
+	for _, anyTrans := range block.Transactions {
+		fee += anyTrans.Balance - anyTrans.Amount - anyTrans.Remain
+	}
+	return fee
+}
+
+func (block *Block) RewardMiner() {
+
+	// Get block reward amount
+	rewardAmount := block.Reward + block.GetFee()
+
+	// Transaction of rewarding miner
+	trans00 := Trans{Sender: "0", Balance: rewardAmount, Receiver: block.MinerBy, Amount: rewardAmount, Timestamp: "today", PreviousTX: []string{}}
+	trans00.Ready()
+	block.Add(trans00)
 }
 
 func CreateKeyValuePairs(m map[string]Trans) string {
@@ -427,15 +458,22 @@ func (BC *Blockchain) createGenesisBlock(genesisBlock Block) bool {
 	PrettyPrint(genesisBlock)
 	BC.Chain = append(BC.Chain, genesisBlock)
 	BC.Lastblock = BC.Chain[len(BC.Chain)-1]
+
+	// append transaction to history
+	for key, trans := range genesisBlock.Transactions {
+		BC.History[key] = trans
+	}
 	return true
 }
 
 // CreateBlock and use that block for stack transaction into it
-func (BC *Blockchain) CreateBlock() Block {
+func (BC *Blockchain) CreateBlock(MinerAddress string) Block {
 	var block Block
 	block.Init(BC.Curve)
 	block.Index = len(BC.Chain) + 1
 	block.Previoushash = BC.Lastblock.Hash
+	block.Reward = BC.GetReward(block.Index)
+	block.MinerBy = MinerAddress
 	return block
 }
 
@@ -479,22 +517,96 @@ func (BC *Blockchain) AddBlock(block Block, proof int64) bool {
 
 	block.Proof = proof
 	block.Hash = BC.HashBlock(block, proof)
-	// Check proof of work
-	if !BC.ValidProof(block.Hash) {
-		fmt.Println("Add block failed proof of work: Proof:", proof, "| Hash", block.Hash)
-		// PrettyPrint(block)
-		return false
-	}
+	if len(BC.Chain) > 0 {
+		// Check proof of work
+		if !BC.ValidProof(block.Hash) {
+			fmt.Println("Add block failed proof of work: Proof:", proof, "| Hash", block.Hash)
+			// PrettyPrint(block)
+			return false
+		}
 
-	// check the index is ok
-	if block.Index != len(BC.Chain)+1 {
-		fmt.Println("Add block failed index")
-		return false
+		// check the index is ok
+		if block.Index != len(BC.Chain)+1 {
+			fmt.Println("Add block failed index")
+			return false
+		}
+
+		// check any transaction in block is valid
+		for key, trans := range block.Transactions {
+			// check balance of any transaction
+			realBal := BC.GetBalance(trans.Sender)
+			if trans.Balance > realBal && trans.Sender != "0" {
+				fmt.Println("Error: Block contain transaction not enough money!:", key)
+				fmt.Println("Real Balance is:", trans)
+				return false
+			}
+
+			// check if transaction is duplicate
+			if val, ok := BC.History[key]; ok {
+				//Transaction is ready exist
+				fmt.Println("Transaction is ready exist. ID=", val)
+				return false
+			}
+
+			// check reward transaction
+			if key == "0" {
+				if trans.Amount > block.GetFee()+BC.GetReward(block.Index) {
+					return false
+				}
+			}
+		}
 	}
 
 	BC.Chain = append(BC.Chain, block)
 	BC.Lastblock = BC.Chain[len(BC.Chain)-1]
+	// append transaction to history
+	for key, trans := range block.Transactions {
+		BC.History[key] = trans
+	}
 	return true
+}
+
+func (BC *Blockchain) GetHistory(userAddress string) []Trans {
+
+	var accHistory []Trans
+	for _, trans := range BC.History {
+		if trans.Sender == userAddress || trans.Receiver == userAddress {
+			accHistory = append(accHistory, trans)
+		}
+	}
+
+	return accHistory
+}
+
+func (BC *Blockchain) GetBalance(userAddress string) float64 {
+
+	var balance float64
+	balance = 0.0
+	accHistory := BC.GetHistory(userAddress)
+	for _, trans := range accHistory {
+		if trans.Receiver == userAddress {
+			balance += trans.Amount
+		}
+		if trans.Sender == userAddress {
+			balance -= trans.Amount
+		}
+	}
+
+	return balance
+}
+
+func (BC *Blockchain) GetReward(index int) float64 {
+	// INITIAL_COINS_PER_BLOCK coins per block.
+	// Reduce by haft every HALVING_FREQUENCY blocks
+	// index = len(self.chain)+1
+	INITIAL_COINS_PER_BLOCK := 50.0
+	HALVING_FREQUENCY := 100000
+	reward := INITIAL_COINS_PER_BLOCK
+	HalvingTime := int(index/HALVING_FREQUENCY) + 1
+	for i := 1; i < HalvingTime; i++ {
+		reward = math.Max(reward/2, 5)
+	}
+	return reward
 }
 
 func testTrans() {
