@@ -541,6 +541,19 @@ func (BC *Blockchain) AddBlock(block Block, proof int64) bool {
 				return false
 			}
 
+			// check if signature is correct
+			if trans.Sender != "0" {
+
+				var testUser Wallet
+				testUser.GenerateKey(BC.Curve)
+				checksign, _ := trans.ForCheckSign()
+				if testUser.Verify(checksign, trans.Sender, trans.Signature) != true {
+					fmt.Println("Error: Signature of transaction of transaction is failed!:", key)
+					fmt.Println("Real Balance is:", trans)
+					return false
+				}
+			}
+
 			// check if transaction is duplicate
 			if val, ok := BC.History[key]; ok {
 				//Transaction is ready exist
@@ -607,6 +620,34 @@ func (BC *Blockchain) GetReward(index int) float64 {
 		reward = math.Max(reward/2, 5)
 	}
 	return reward
+}
+
+func (BC *Blockchain) ResolveConflict(newchain []Block) bool {
+
+	if len(BC.Chain) < len(newchain) {
+		return false
+	}
+
+	lastblock := newchain[0]
+	var blockchainTest Blockchain
+	blockchainTest.Init(BC.Curve, newchain[0])
+	var block Block
+	for currentIndex := 1; currentIndex < len(newchain); currentIndex++ {
+		block = newchain[currentIndex]
+		// check if any block-hash of the newchain is valid
+		if block.Previoushash != BC.HashBlock(lastblock, lastblock.Proof) {
+			return false
+		}
+
+		// Simulate the process of block for cheking
+		if blockchainTest.AddBlock(block, lastblock.Proof) == false {
+			return false
+		}
+		lastblock = block
+	}
+	BC.Chain = blockchainTest.Chain
+	BC.History = blockchainTest.History
+	return true
 }
 
 func testTrans() {
